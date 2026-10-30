@@ -1,0 +1,95 @@
+name: STOXballz - Update and publish
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'STOX_01_CORE.zip'
+      - 'STOX_02_ART.zip'
+      - 'STOX_03_ART.zip'
+      - 'STOX_04_ART.zip'
+      - 'STOX_05_ART.zip'
+      - '.github/workflows/stoxballz.yml'
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+concurrency:
+  group: stoxballz-production
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Open repository
+        uses: actions/checkout@v6
+      - name: Prepare Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Unpack the five small site packages
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile, shutil
+          output = Path('site-build')
+          output.mkdir(exist_ok=True)
+          for name in ['STOX_01_CORE.zip', 'STOX_02_ART.zip', 'STOX_03_ART.zip', 'STOX_04_ART.zip', 'STOX_05_ART.zip']:
+              if not Path(name).is_file():
+                  raise SystemExit('Missing '+name+'. Upload all five small ZIP files to the repository main page, one file per commit.')
+              with zipfile.ZipFile(name) as archive:
+                  for entry in archive.namelist():
+                      target = (output / entry).resolve()
+                      if not target.is_relative_to(output.resolve()):
+                          raise SystemExit('Invalid archive path')
+                  archive.extractall(output)
+          saved = Path('stoxballz-state.json')
+          if saved.exists():
+              shutil.copyfile(saved, output / 'docs/data/state.json')
+          PY
+      - name: Check catalog, artwork, scoring and package
+        working-directory: site-build
+        run: python -m unittest discover -s tests
+      - name: Collect real news and disaster feeds
+        id: collect
+        continue-on-error: true
+        working-directory: site-build
+        run: python scripts/update.py
+      - name: Retain shared prices and event ledger
+        run: |
+          cp site-build/docs/data/state.json stoxballz-state.json
+          git config user.name "STOXballz updater"
+          git config user.email "stoxballz@users.noreply.github.com"
+          git add stoxballz-state.json
+          git diff --cached --quiet || git commit -m "Refresh STOXballz shared ledger"
+          git push
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Upload the website
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: site-build/docs
+      - name: Publish
+        id: deployment
+        uses: actions/deploy-pages@v4
+      - name: Report data health
+        if: always()
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import json, os
+          p = Path('site-build/docs/data/state.json')
+          if p.exists():
+              state = json.loads(p.read_text())
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+                  out.write('## STOXballz data health\n')
+                  out.write('Last successful collection: '+str(state.get('updated_at', 'none'))+'\n\n')
+                  for feed in state.get('feeds', []):
+                      out.write('- '+feed['source']+': '+('connected' if feed['ok'] else 'FAILED - retained previous data')+'\n')
+          PY
